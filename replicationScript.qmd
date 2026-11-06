@@ -1,0 +1,1847 @@
+---
+title: "Analisis Dual Function Hypothesis"
+format: html
+editor: visual
+---
+
+## Load Libraries
+
+```{r}
+
+library(tidyverse)
+library(lavaan)
+library(sandwich)
+library(readxl)
+library(lme4)
+library(stargazer)
+library(clubSandwich)
+library(MASS)
+library(lmtest)
+library(fwildclusterboot)
+library(fixest)
+library(gt)
+library(ivreg)
+```
+
+## Load Data & Seed
+
+```{r}
+
+set.seed(852347)
+
+rawData <- read_excel("2_p3_updated.xlsx")
+
+averagedData <- read_excel("basefinal.xlsx")
+```
+
+## Preprocess
+
+```{r}
+
+averagedData <- averagedData %>%
+  rename(
+    AttractivenessStd = ZAT3,
+    FightingStd = ZLU3,
+    FFAStd = ZProcustes_FA,
+    fWHRStd = ZFWHR,
+    BMIStd = ZIMC
+  ) %>%
+  mutate(
+    resfWHRStd = as.numeric(scale(res_FWHR)),
+    AgeStd = as.numeric(scale(Edad)),
+    fWHR_FFA = fWHRStd*FFAStd
+  )
+
+dataLong <- rawData %>%
+  pivot_longer(
+    cols = matches("^(ATE|LUE)\\d+$"),        # pick ATE1… and LUE1… columns
+    names_to = c(".value", "Rater"),       # .value => create cols from prefixes
+    names_pattern = "([A-Z]+)(\\d+)"           # capture prefix and the number
+  ) %>%
+    rename(
+    Attractiveness = ATE,
+    Fighting = LUE,
+    FFA = "Procustes FA"
+  ) %>%
+  mutate(
+    Rater = as.integer(Rater),
+    FFAStd = as.numeric(scale(FFA)),
+    fWHRStd = as.numeric(scale(fWHR)),
+    AgeStd = as.numeric(scale(Edad)),
+    BMIStd = as.numeric(scale(IMC)),
+    
+    # Center on the grand mean and scale with the variance of the averaged scores to replicate results
+    AttractivenessStd = (Attractiveness - mean(Attractiveness)) / sd(rawData$ATmed),
+    FightingStd = (Fighting - mean(Fighting)) / sd(rawData$LUmed),
+    
+    resfWHRStd = as.numeric(scale(res_fWHR)),
+    Attractiveness = as.factor(Attractiveness),
+    Fighting = as.factor(Fighting)
+    )
+
+
+```
+
+## Set Significance
+
+```{r}
+
+alpha <- 0.05
+```
+
+## Main Model
+
+```{r}
+
+# helper to align robust SEs to the model's coef vector
+robust_se <- function(model, vcov_mat) {
+  se <- sqrt(diag(vcov_mat))[names(coef(model))]
+  unname(as.numeric(se))
+}
+
+# Simple models
+modelAttrSimple <- lm(AttractivenessStd ~ fWHRStd + FFAStd, data = averagedData)
+AttrRobustSimpleHC <- vcovHC(modelAttrSimple, type = "HC3")
+AttrRobustSimpleSE <- robust_se(modelAttrSimple, AttrRobustSimpleHC)
+
+modelFghtSimple <- lm(FightingStd ~ fWHRStd + FFAStd, data = averagedData)
+FghtRobustSimpleHC <- vcovHC(modelFghtSimple, type = "HC3")
+FghtRobustSimpleSE <- robust_se(modelFghtSimple, FghtRobustSimpleHC)
+
+# BMI controls
+modelAttrBMI <- lm(AttractivenessStd ~ fWHRStd + FFAStd + BMIStd, data = averagedData)
+AttrRobustBMIHC <- vcovHC(modelAttrBMI, type = "HC3")
+AttrRobustBMISE <- robust_se(modelAttrBMI, AttrRobustBMIHC)
+
+modelFghtBMI <- lm(FightingStd ~ fWHRStd + FFAStd + BMIStd, data = averagedData)
+FghtRobustBMIHC <- vcovHC(modelFghtBMI, type = "HC3")
+FghtRobustBMISE <- robust_se(modelFghtBMI, FghtRobustBMIHC)
+
+# Age controls
+modelAttrAge <- lm(AttractivenessStd ~ fWHRStd + FFAStd + BMIStd + AgeStd, data = averagedData)
+AttrRobustAgeHC <- vcovHC(modelAttrAge, type = "HC3")
+AttrRobustAgeSE <- robust_se(modelAttrAge, AttrRobustAgeHC)
+
+modelFghtAge <- lm(FightingStd ~ fWHRStd + FFAStd + BMIStd + AgeStd, data = averagedData)
+FghtRobustAgeHC <- vcovHC(modelFghtAge, type = "HC3")
+FghtRobustAgeSE <- robust_se(modelFghtAge, FghtRobustAgeHC)
+
+# "Full" models — note the interaction only appears in modelAttr here
+modelAttr <- lm(AttractivenessStd ~ fWHRStd + FFAStd + fWHRStd*FFAStd + BMIStd + AgeStd, data = averagedData)
+AttrRobustHC <- vcovHC(modelAttr, type = "HC3")
+AttrRobustSE <- robust_se(modelAttr, AttrRobustHC)
+
+modelFght <- lm(FightingStd ~ fWHRStd + FFAStd + BMIStd + AgeStd, data = averagedData)
+FghtRobustHC <- vcovHC(modelFght, type = "HC3")
+FghtRobustSE <- robust_se(modelFght, FghtRobustHC)
+
+
+stargazer(modelAttrSimple, modelAttrBMI, modelAttrAge, modelAttr,
+          se=list(AttrRobustSimpleSE, AttrRobustBMISE, AttrRobustAgeSE, AttrRobustSE),
+          type="text")
+stargazer(modelFghtSimple, modelFghtBMI, modelFghtAge, modelFght,
+          se=list(FghtRobustSimpleSE, FghtRobustBMISE, FghtRobustAgeSE, FghtRobustSE),
+          type="text")
+```
+
+### Compute Robust Statistics
+
+```{r}
+
+# SIMPLE
+AttrSimpleTest <- coeftest(modelAttrSimple, vcov.=AttrRobustSimpleHC, df=modelAttrSimple$df.residual)
+
+FghtSimpleTest <- coeftest(modelFghtSimple, vcov.=FghtRobustSimpleHC, df=modelFghtSimple$df.residual)
+
+# BMI
+
+AttrBMITest <- coeftest(modelAttrBMI, vcov.=AttrRobustBMIHC, df=modelAttrBMI$df.residual)
+
+FghtBMITest <- coeftest(modelFghtBMI, vcov.=FghtRobustBMIHC, df=modelFghtBMI$df.residual)
+
+# AGE
+
+AttrAgeTest <- coeftest(modelAttrAge, vcov.=AttrRobustAgeHC, df=modelAttrAge$df.residual)
+
+FghtAgeTest <- coeftest(modelFghtAge, vcov.=FghtRobustAgeHC, df=modelFghtAge$df.residual)
+
+# FULL
+
+AttrTest <- coeftest(modelAttr, vcov.=AttrRobustHC, df=modelAttr$df.residual)
+
+FghtTest <- coeftest(modelFght, vcov.=FghtRobustHC, df=modelFght$df.residual)
+
+AttrTest
+
+FghtTest
+```
+
+### Compute effect sizes
+
+```{r}
+
+# PARTIAL
+
+AttrEffectSizes <- AttrTest[,"t value"]^2 / (AttrTest[,"t value"]^2 + modelAttr$df.residual)
+
+FghtEffectSizes <- FghtTest[,"t value"]^2 / (FghtTest[,"t value"]^2 + modelAttr$df.residual)
+
+round(AttrEffectSizes, digits=3)
+
+round(FghtEffectSizes, digits=3)
+
+# SEMI PARTIAL
+
+AttrSummary <- summary(modelAttr)
+
+FghtSummary <- summary(modelFght)
+
+AttrReducedFFA <- lm(AttractivenessStd ~ fWHRStd + fWHR_FFA + BMIStd + AgeStd, data = averagedData)
+
+AttrReducedSummaryFFA <- summary(AttrReducedFFA)
+
+AttrReducedfWHR <- lm(AttractivenessStd ~ FFAStd + fWHR_FFA + BMIStd + AgeStd, data = averagedData)
+
+AttrReducedSummaryfWHR <- summary(AttrReducedfWHR)
+
+AttrReducedInt <- lm(AttractivenessStd ~ fWHRStd + FFAStd + BMIStd + AgeStd, data = averagedData)
+
+AttrReducedSummaryInt <- summary(AttrReducedInt)
+
+FghtReducedFFA <- lm(FightingStd ~ fWHRStd + BMIStd + AgeStd, data = averagedData)
+
+FghtReducedSummaryFFA <- summary(FghtReducedFFA)
+
+FghtReducedfWHR <- lm(FightingStd ~ FFAStd + BMIStd + AgeStd, data = averagedData)
+
+FghtReducedSummaryfWHR <- summary(FghtReducedfWHR)
+
+EtaAttrFFA <- AttrSummary$r.squared - AttrReducedSummaryFFA$r.squared
+
+cat("Effect size for FFA on attractiveness is ", round(EtaAttrFFA, digits=3), "\n")
+
+EtaAttrfWHR <- AttrSummary$r.squared - AttrReducedSummaryfWHR$r.squared
+
+cat("Effect size for fWHR on attractiveness is ", round(EtaAttrfWHR, digits=3), "\n")
+
+EtaAttrInt <- AttrSummary$r.squared - AttrReducedSummaryInt$r.squared
+
+cat("Effect size for fWHR x FFA on attractiveness is ", round(EtaAttrInt, digits=3), "\n")
+
+EtaFghtFFA <- FghtSummary$r.squared - FghtReducedSummaryFFA$r.squared
+
+cat("Effect size for FFA on fighting ability is ", round(EtaFghtFFA, digits=3), "\n")
+
+EtaFghtfWHR <- FghtSummary$r.squared - FghtReducedSummaryfWHR$r.squared
+
+cat("Effect size for fWHR on fighting ability is ", round(EtaFghtfWHR, digits=3), "\n")
+
+```
+
+### Print table
+
+#### Set up
+
+```{r}
+
+# Which rows to show (and in what order)
+termOrder <- c("fWHRStd", "FFAStd", "fWHRStd:FFAStd", "BMIStd", "AgeStd", "(Intercept)")
+
+# Pretty labels for the leftmost "Variable" column
+termsMap <- c(
+  "fWHRStd" = "fWHR (z)",
+  "FFAStd"  = "FFA (z)",
+  "fWHRStd:FFAStd" = "fWHR × FFA",
+  "BMIStd"  = "BMI (z)",
+  "AgeStd" = "Age (z)",
+  "(Intercept)" = "Intercept"
+)
+
+predictors <- unname(termsMap)
+```
+
+#### Simple model
+
+##### Attractiveness
+
+```{r}
+
+summaryAttrSimple <- summary(modelAttrSimple)
+
+AttrOrderSimple <- match(termOrder, rownames(AttrSimpleTest))
+
+AttrRejectionSimple <- qt(1 - alpha/2, df=modelAttr$df.residual)
+
+AttrEstimatesSimple <- AttrSimpleTest[,"Estimate"][AttrOrderSimple]
+
+AttrErrorsSimple <- AttrSimpleTest[,"Std. Error"][AttrOrderSimple]
+
+AttrLowerSimple <- round(AttrEstimatesSimple - AttrRejectionSimple * AttrErrorsSimple, digits=3)
+
+AttrUpperSimple <- round(AttrEstimatesSimple + AttrRejectionSimple * AttrErrorsSimple, digits=3)
+
+AttrConfIntSimple <- ifelse(is.na(AttrLowerSimple) | is.na(AttrUpperSimple), "", paste0("[", AttrLowerSimple, " ,", AttrUpperSimple, "]"))
+  
+AttrStatSimple <- round(AttrSimpleTest[,"t value"][AttrOrderSimple], digits=3)
+
+AttrPvalueSimple <- round(AttrSimpleTest[,"Pr(>|t|)"][AttrOrderSimple], digits=3)
+
+AttrSimple <- tibble(Variable=predictors, Estimate=round(AttrEstimatesSimple, digits=3), SE=round(AttrErrorsSimple, digits=3), CI=AttrConfIntSimple, StatType="t", Stat=AttrStatSimple, df=paste0("(", modelAttrSimple$df.residual, ")"), p=AttrPvalueSimple, r= summaryAttrSimple$adj.r.squared, n=nobs(modelAttrSimple))
+```
+
+##### Fighting
+
+```{r}
+
+summaryFghtSimple <- summary(modelFghtSimple)
+
+FghtOrderSimple <- match(termOrder, rownames(FghtSimpleTest))
+
+FghtRejectionSimple <- qt(1 - alpha/2, df=modelFght$df.residual)
+
+FghtEstimatesSimple <- FghtSimpleTest[,"Estimate"][FghtOrderSimple]
+
+FghtErrorsSimple <- FghtSimpleTest[,"Std. Error"][FghtOrderSimple]
+
+FghtLowerSimple <- round(FghtEstimatesSimple - FghtRejectionSimple * FghtErrorsSimple, digits=3)
+
+FghtUpperSimple <- round(FghtEstimatesSimple + FghtRejectionSimple * FghtErrorsSimple, digits=3)
+
+FghtConfIntSimple <- ifelse(is.na(FghtLowerSimple) | is.na(FghtUpperSimple), "", paste0("[", FghtLowerSimple, " ,", FghtUpperSimple, "]"))
+  
+FghtStatSimple <- round(FghtSimpleTest[,"t value"][FghtOrderSimple], digits=3)
+
+FghtPvalueSimple <- round(FghtSimpleTest[,"Pr(>|t|)"][FghtOrderSimple], digits=3)
+
+FghtSimple <- tibble(Variable=predictors, Estimate=round(FghtEstimatesSimple, digits=3), SE=round(FghtErrorsSimple, digits=3), CI=FghtConfIntSimple, StatType="t", Stat=FghtStatSimple, df=paste0("(", modelFghtSimple$df.residual, ")"), p=FghtPvalueSimple, r= summaryFghtSimple$adj.r.squared, n=nobs(modelFghtSimple))
+```
+
+#### BMI Control
+
+##### Attractiveness
+
+```{r}
+
+summaryAttrBMI <- summary(modelAttrBMI)
+
+AttrOrderBMI <- match(termOrder, rownames(AttrBMITest))
+
+AttrRejectionBMI <- qt(1 - alpha/2, df=modelAttr$df.residual)
+
+AttrEstimatesBMI <- AttrBMITest[,"Estimate"][AttrOrderBMI]
+
+AttrErrorsBMI <- AttrBMITest[,"Std. Error"][AttrOrderBMI]
+
+AttrLowerBMI <- round(AttrEstimatesBMI - AttrRejectionBMI * AttrErrorsBMI, digits=3)
+
+AttrUpperBMI <- round(AttrEstimatesBMI + AttrRejectionBMI * AttrErrorsBMI, digits=3)
+
+AttrConfIntBMI <- ifelse(is.na(AttrLowerBMI) | is.na(AttrUpperBMI), "", paste0("[", AttrLowerBMI, " ,", AttrUpperBMI, "]"))
+  
+AttrStatBMI <- round(AttrBMITest[,"t value"][AttrOrderBMI], digits=3)
+
+AttrPvalueBMI <- round(AttrBMITest[,"Pr(>|t|)"][AttrOrderBMI], digits=3)
+
+AttrBMI <- tibble(Variable=predictors, Estimate=round(AttrEstimatesBMI, digits=3), SE=round(AttrErrorsBMI, digits=3), CI=AttrConfIntBMI, StatType="t", Stat=AttrStatBMI, df=paste0("(", modelAttrBMI$df.residual, ")"), p=AttrPvalueBMI, r= summaryAttrBMI$adj.r.squared, n=nobs(modelAttrBMI))
+```
+
+##### Fighting
+
+```{r}
+
+summaryFghtBMI <- summary(modelFghtBMI)
+
+FghtOrderBMI <- match(termOrder, rownames(FghtBMITest))
+
+FghtRejectionBMI <- qt(1 - alpha/2, df=modelFght$df.residual)
+
+FghtEstimatesBMI <- FghtBMITest[,"Estimate"][FghtOrderBMI]
+
+FghtErrorsBMI <- FghtBMITest[,"Std. Error"][FghtOrderBMI]
+
+FghtLowerBMI <- round(FghtEstimatesBMI - FghtRejectionBMI * FghtErrorsBMI, digits=3)
+
+FghtUpperBMI <- round(FghtEstimatesBMI + FghtRejectionBMI * FghtErrorsBMI, digits=3)
+
+FghtConfIntBMI <- ifelse(is.na(FghtLowerBMI) | is.na(FghtUpperBMI), "", paste0("[", FghtLowerBMI, " ,", FghtUpperBMI, "]"))
+  
+FghtStatBMI <- round(FghtBMITest[,"t value"][FghtOrderBMI], digits=3)
+
+FghtPvalueBMI <- round(FghtBMITest[,"Pr(>|t|)"][FghtOrderBMI], digits=3)
+
+FghtBMI <- tibble(Variable=predictors, Estimate=round(FghtEstimatesBMI, digits=3), SE=round(FghtErrorsBMI, digits=3), CI=FghtConfIntBMI, StatType="t", Stat=FghtStatBMI, df=paste0("(", modelFghtBMI$df.residual, ")"), p=FghtPvalueBMI, r= summaryFghtBMI$adj.r.squared, n=nobs(modelFghtBMI))
+```
+
+#### Age Control
+
+##### Attractiveness
+
+```{r}
+
+summaryAttrAge <- summary(modelAttrAge)
+
+AttrOrderAge <- match(termOrder, rownames(AttrAgeTest))
+
+AttrRejectionAge <- qt(1 - alpha/2, df=modelAttr$df.residual)
+
+AttrEstimatesAge <- AttrAgeTest[,"Estimate"][AttrOrderAge]
+
+AttrErrorsAge <- AttrAgeTest[,"Std. Error"][AttrOrderAge]
+
+AttrLowerAge <- round(AttrEstimatesAge - AttrRejectionAge * AttrErrorsAge, digits=3)
+
+AttrUpperAge <- round(AttrEstimatesAge + AttrRejectionAge * AttrErrorsAge, digits=3)
+
+AttrConfIntAge <- ifelse(is.na(AttrLowerAge) | is.na(AttrUpperAge), "", paste0("[", AttrLowerAge, " ,", AttrUpperAge, "]"))
+  
+AttrStatAge <- round(AttrAgeTest[,"t value"][AttrOrderAge], digits=3)
+
+AttrPvalueAge <- round(AttrAgeTest[,"Pr(>|t|)"][AttrOrderAge], digits=3)
+
+AttrAge <- tibble(Variable=predictors, Estimate=round(AttrEstimatesAge, digits=3), SE=round(AttrErrorsAge, digits=3), CI=AttrConfIntAge, StatType="t", Stat=AttrStatAge, df=paste0("(", modelAttrAge$df.residual, ")"), p=AttrPvalueAge, r= summaryAttrAge$adj.r.squared, n=nobs(modelAttrAge))
+```
+
+##### Fighting
+
+```{r}
+
+summaryFghtAge <- summary(modelFghtAge)
+
+FghtOrderAge <- match(termOrder, rownames(FghtAgeTest))
+
+FghtRejectionAge <- qt(1 - alpha/2, df=modelFght$df.residual)
+
+FghtEstimatesAge <- FghtAgeTest[,"Estimate"][FghtOrderAge]
+
+FghtErrorsAge <- FghtAgeTest[,"Std. Error"][FghtOrderAge]
+
+FghtLowerAge <- round(FghtEstimatesAge - FghtRejectionAge * FghtErrorsAge, digits=3)
+
+FghtUpperAge <- round(FghtEstimatesAge + FghtRejectionAge * FghtErrorsAge, digits=3)
+
+FghtConfIntAge <- ifelse(is.na(FghtLowerAge) | is.na(FghtUpperAge), "", paste0("[", FghtLowerAge, " ,", FghtUpperAge, "]"))
+  
+FghtStatAge <- round(FghtAgeTest[,"t value"][FghtOrderAge], digits=3)
+
+FghtPvalueAge <- round(FghtAgeTest[,"Pr(>|t|)"][FghtOrderAge], digits=3)
+
+FghtAge <- tibble(Variable=predictors, Estimate=round(FghtEstimatesAge, digits=3), SE=round(FghtErrorsAge, digits=3), CI=FghtConfIntAge, StatType="t", Stat=FghtStatAge, df=paste0("(", modelFghtAge$df.residual, ")"), p=FghtPvalueAge, r= summaryFghtAge$adj.r.squared, n=nobs(modelFghtAge))
+```
+
+#### Full Model
+
+##### Attractiveness
+
+```{r}
+
+summaryAttr <- summary(modelAttr)
+
+AttrOrder <- match(termOrder, rownames(AttrTest))
+
+AttrRejection <- qt(1 - alpha/2, df=modelAttr$df.residual)
+
+AttrEstimates <- AttrTest[,"Estimate"][AttrOrder]
+
+AttrErrors <- AttrTest[,"Std. Error"][AttrOrder]
+
+AttrLower <- round(AttrEstimates - AttrRejection * AttrErrors, digits=3)
+
+AttrUpper <- round(AttrEstimates + AttrRejection * AttrErrors, digits=3)
+
+AttrConfInt <- ifelse(is.na(AttrLower) | is.na(AttrUpper), "", paste0("[", AttrLower, " ,", AttrUpper, "]"))
+  
+AttrStat <- round(AttrTest[,"t value"][AttrOrder], digits=3)
+
+AttrPvalue <- round(AttrTest[,"Pr(>|t|)"][AttrOrder], digits=3)
+
+AttrFull <- tibble(Variable=predictors, Estimate=round(AttrEstimates, digits=3), SE=round(AttrErrors, digits=3), CI=AttrConfInt, StatType="t", Stat=AttrStat, df=paste0("(", modelAttr$df.residual, ")"), p=AttrPvalue, r= summaryAttr$adj.r.squared, n=nobs(modelAttr))
+```
+
+##### Fighting
+
+```{r}
+
+summaryFght <- summary(modelFght)
+
+FghtOrder <- match(termOrder, rownames(FghtTest))
+
+FghtRejection <- qt(1 - alpha/2, df=modelFght$df.residual)
+
+FghtEstimates <- FghtTest[,"Estimate"][FghtOrder]
+
+FghtErrors <- FghtTest[,"Std. Error"][FghtOrder]
+
+FghtLower <- round(FghtEstimates - FghtRejection * FghtErrors, digits=3)
+
+FghtUpper <- round(FghtEstimates + FghtRejection * FghtErrors, digits=3)
+
+FghtConfInt <- ifelse(is.na(FghtLower) | is.na(FghtUpper), "", paste0("[", FghtLower, " ,", FghtUpper, "]"))
+  
+FghtStat <- round(FghtTest[,"t value"][FghtOrder], digits=3)
+
+FghtPvalue <- round(FghtTest[,"Pr(>|t|)"][FghtOrder], digits=3)
+
+FghtFull <- tibble(Variable=predictors, Estimate=round(FghtEstimates, digits=3), SE=round(FghtErrors, digits=3), CI=FghtConfInt, StatType="t", Stat=FghtStat, df=paste0("(", modelFght$df.residual, ")"), p=FghtPvalue, r= summaryFght$adj.r.squared, n=nobs(modelFght))
+```
+
+#### Consolidate table
+
+```{r}
+
+PvalueFunction <- function(p) {
+  if (is.na(p) || p == "") return("")
+  p <- as.numeric(p)
+  if (p < .001) "p<.001" else paste0("p=", sub("^0\\.", ".", sprintf("%.3f", p)))
+}
+
+StatlineFunction <- function(statType, stat, p, df = "") {
+  if (is.na(stat) || is.na(p) || stat == "" || p == "") return("")
+  paste0(
+    statType, df, "=", sprintf("%.3f", as.numeric(stat)),
+    ", ", PvalueFunction(p)
+  )
+}
+
+sig_code <- function(p) {
+  p <- suppressWarnings(as.numeric(gsub("[^0-9.eE-]", "", as.character(p))))
+  if (is.na(p)) return("")
+  if (p < .001) "<sup>***</sup>"
+  else if (p < .01) "<sup>**</sup>"
+  else if (p < .05) "<sup>*</sup>"
+  else if (p < .10) "<sup>\u2020</sup>"  # dagger for 10%
+  else ""
+}
+
+# Helper: build observations row
+formatN <- function(df) {
+  n  <- df$n[1]
+  paste(n)
+}
+
+# Helper: build r squared row
+formatR <- function(df) {
+  r  <- round(df$r[1], digits=3)
+  paste0("**", r, "**")
+}
+
+block <- function(x) ifelse(x == "" | is.na(x), "", paste0("<span style='display:block; white-space:nowrap;'>", x, "</span>"))
+
+# Build cell (4 lines)
+mk_cell <- function(df) {
+  stars <- vapply(df$p, sig_code, FUN.VALUE = character(1))
+  line1 <- ifelse(is.na(df$Estimate), "\u2014", paste0("**", df$Estimate, "**", stars)) |> block()
+  line2 <- ifelse(is.na(df$SE), "", paste0("(", df$SE, ")")) |> block()
+  line3 <- df$CI |> block()
+  line4 <- mapply(StatlineFunction, df$StatType, df$Stat, df$p, df$df, SIMPLIFY = TRUE, USE.NAMES = FALSE) |> block()
+  paste0(line1, line2, line3, line4)
+}
+```
+
+```{r}
+
+AttrSimple$Cell <- mk_cell(AttrSimple)
+AttrBMI$Cell    <- mk_cell(AttrBMI)
+AttrAge$Cell    <- mk_cell(AttrAge)
+AttrFull$Cell   <- mk_cell(AttrFull)
+
+FghtSimple$Cell <- mk_cell(FghtSimple)
+FghtBMI$Cell    <- mk_cell(FghtBMI)
+FghtAge$Cell    <- mk_cell(FghtAge)
+
+# Reduce to one wide table
+DataWide <- Reduce(
+  function(x, y) dplyr::left_join(x, y, by = "Variable"),
+  list(
+    dplyr::transmute(AttrSimple,  Variable,  AttrSimple = Cell),
+    dplyr::transmute(AttrBMI,     Variable,  AttrBMI    = Cell),
+    dplyr::transmute(AttrAge,     Variable,  AttrAge    = Cell),
+    dplyr::transmute(AttrFull,    Variable,  AttrFull   = Cell),
+    dplyr::transmute(FghtSimple,  Variable,  FghtSimple = Cell),
+    dplyr::transmute(FghtBMI,     Variable,  FghtBMI    = Cell),
+    dplyr::transmute(FghtAge,     Variable,  FghtAge    = Cell)
+  )
+)
+
+# Add r squared row
+RsqRow <- data.frame(
+  Variable              = "R\u00b2 adj.",
+  AttrSimple            = formatR(AttrSimple),
+  AttrBMI               = formatR(AttrBMI),
+  AttrAge               = formatR(AttrAge),
+  AttrFull              = formatR(AttrFull),
+  FghtSimple            = formatR(FghtSimple),
+  FghtBMI               = formatR(FghtBMI),
+  FghtAge               = formatR(FghtAge),
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+
+# Add observations row
+ObsRow <- data.frame(
+  Variable              = "Observations",
+  AttrSimple            = formatN(AttrSimple),
+  AttrBMI               = formatN(AttrBMI),
+  AttrAge               = formatN(AttrAge),
+  AttrFull              = formatN(AttrFull),
+  FghtSimple            = formatN(FghtSimple),
+  FghtBMI               = formatN(FghtBMI),
+  FghtAge               = formatN(FghtAge),
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+
+DataWide <- dplyr::bind_rows(DataWide, RsqRow, ObsRow)
+```
+
+#### Print
+
+```{r}
+
+gt_main <- DataWide |>
+  gt(rowname_col = "Variable") |>
+  # Two spanners: Attractiveness vs Fighting
+  tab_spanner(label = md("**Attractiveness (z)**"),    columns = AttrSimple:AttrFull) |>
+  tab_spanner(label = md("**Fighting Ability (z)**"),  columns = FghtSimple:FghtAge) |>
+  # Optional: pretty inner labels (same for both sides)
+  cols_label(
+    AttrSimple = "(1)", AttrBMI = "(2)",
+    AttrAge = "(3)", AttrFull = "(4)",
+    FghtSimple = "(1)", FghtBMI = "(2)",
+    FghtAge = "(3)"
+  ) |>
+  tab_options(table.font.size = gt::px(11)) |>
+  fmt_markdown(everything()) |>
+  tab_source_note(md("**Note.** Ordinary least squares (OLS) on target-level averages (mean of 11 independent raters) for perceived attractiveness and fighting ability. Outcomes and predictors marked “(z)” are standardized (mean = 0, sd = 1); * p<.05, ** p<.01, *** p<.001; † p<.10. Parentheses show Huber–White heteroskedasticity-consistent standard errors (HC3); square brackets denote 95% confidence intervals. fWHR=Facial Weight to Hight Ratio; FFA=Fluctuating Facial Asymmetry; BMI=Body Mass Index. All values were rounded to 3 decimal places.")) |>
+  tab_style(
+    style = cell_text(align = "justify"),
+    locations = cells_source_notes()
+  )
+
+gt_main <- gt_main |>
+  # Header left
+  tab_header(title = md("*Table 3. The Dual Function Hypothesis*")) |>
+  tab_style(
+    style = cell_text(size = px(11), align = "left"),
+    locations = list(
+      cells_title(groups = "title"),
+      cells_title(groups = "subtitle")
+    )
+  ) |>
+  # Body: left-align Variable, center the rest
+  cols_align(align = "left",   columns = "Variable") |>
+  cols_align(align = "center", columns = -Variable) |>
+  # (Optional) center column labels and spanner labels
+  tab_style(style = cell_text(align = "center"),
+            locations = cells_column_labels(columns = everything())) |>
+  tab_style(style = cell_text(align = "center"),
+            locations = cells_column_spanners())
+
+
+gt_main
+```
+
+```{r}
+
+gtsave(gt_main, "MAIN_TABLE.html", inline_css = TRUE)
+
+# higher zoom = sharper text; expand adds padding so nothing gets clipped
+gtsave(
+  gt_main,
+  filename = "MAIN_TABLE.png",
+  vwidth = 1300,
+  expand = 5         # pixels of padding around the table
+)
+```
+
+## Within Cluster Robustness Check
+
+### Pooled OLS with clustering on rater
+
+```{r}
+
+dataLong$Rater <- as.factor(dataLong$Rater)
+
+modelAttrClust <- lm(AttractivenessStd ~ fWHRStd + FFAStd + fWHRStd*FFAStd + BMIStd + AgeStd, data = dataLong)
+
+AttrClustSummary <- summary(modelAttrClust)
+
+AttrClustRobustCR <- vcovCR(modelAttrClust,  cluster = dataLong$Rater, type = "CR2")
+
+# AttrClustRobustHC <- vcovCR(modelAttrClust,  cluster = 1:length(dataLong$Rater), type = "CR2")
+
+AttrClustRobustSE <- sqrt(diag(AttrClustRobustCR))
+
+modelFghtClust <- lm(FightingStd ~ fWHRStd + FFAStd + BMIStd + AgeStd, data = dataLong)
+
+FghtClustSummary <- summary(modelFghtClust)
+
+FghtClustRobustCR <- vcovCR(modelFghtClust,  cluster = dataLong$Rater, type = "CR2")
+
+#FghtClustRobustHC <- vcovCR(modelFghtClust,  cluster = 1:length(dataLong$Rater), type = "CR2")
+
+FghtClustRobustSE <- sqrt(diag(FghtClustRobustCR))
+
+stargazer(modelAttrClust, modelFghtClust, se=list(AttrClustRobustSE, FghtClustRobustSE), type="text")
+```
+
+#### Satterthwaite t-tests
+
+```{r}
+
+AttrClustTest <- coef_test(modelAttrClust, vcov=AttrClustRobustCR, test = "Satterthwaite")
+
+FghtClustTest <- coef_test(modelFghtClust, vcov=FghtClustRobustCR, test = "Satterthwaite")
+
+AttrClustTest
+
+FghtClustTest
+```
+
+#### Wild Cluster Restricted Bootstrap
+
+##### Attractiveness
+
+```{r}
+
+modelAttrWCR <- feols(AttractivenessStd ~ fWHRStd + FFAStd + fWHRStd*FFAStd + BMIStd + AgeStd, data = dataLong)
+
+# Attractiveness model: single-parameter tests
+bt_atr_ffa <- boottest(
+  modelAttrWCR,
+  clustid = "Rater",
+  param   = "FFAStd",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_atr_ffa)
+
+bt_atr_fWHR <- boottest(
+  modelAttrWCR,
+  clustid = "Rater",
+  param   = "fWHRStd",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_atr_fWHR)
+
+bt_atr_fWHR_ffa <- boottest(
+  modelAttrWCR,
+  clustid = "Rater",
+  param   = "fWHRStd:FFAStd",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_atr_fWHR_ffa)
+
+bt_atr_bmi <- boottest(
+  modelAttrWCR,
+  clustid = "Rater",
+  param   = "BMIStd",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_atr_bmi)
+
+bt_atr_age <- boottest(
+  modelAttrWCR,
+  clustid = "Rater",
+  param   = "AgeStd",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_atr_age)
+
+bt_atr_int <- boottest(
+  modelAttrWCR,
+  clustid = "Rater",
+  param   = "(Intercept)",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_atr_int)
+
+```
+
+##### Fighting ability
+
+```{r}
+
+modelFghtWCR <- feols(FightingStd ~ fWHRStd + FFAStd + BMIStd + AgeStd, data = dataLong)
+
+# Fighting model: single-parameter tests
+bt_fight_ffa <- boottest(
+  modelFghtWCR,
+  clustid = "Rater",
+  param   = "FFAStd",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_fight_ffa)
+
+bt_fight_fWHR <- boottest(
+  modelFghtWCR,
+  clustid = "Rater",
+  param   = "fWHRStd",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_fight_fWHR)
+
+bt_fight_bmi <- boottest(
+  modelFghtWCR,
+  clustid = "Rater",
+  param   = "BMIStd",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_fight_bmi)
+
+bt_fight_age <- boottest(
+  modelFghtWCR,
+  clustid = "Rater",
+  param   = "AgeStd",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_fight_age)
+
+bt_fight_int <- boottest(
+  modelFghtWCR,
+  clustid = "Rater",
+  param   = "(Intercept)",
+  B       = 9999,
+  type    = "webb",
+)
+summary(bt_fight_int)
+
+```
+
+### Random Intercepts and Intraclass Correlation Coefficient (ICC)
+
+Obtain ICC from a random intercept hierarchical model, approximation assuming normality.
+
+#### Simple ICC
+
+Fit a simple random intercept model, recover ICC
+
+```{r}
+
+modelAttrNull <- lmer(AttractivenessStd ~ 1 + (1|Rater), data = dataLong)
+v_u <- as.numeric(VarCorr(modelAttrNull)$Rater[1])  # between-rater variance
+v_e <- sigma(modelAttrNull)^2                       # within-rater variance
+AttrNullICC <- v_u / (v_u + v_e)
+AttrNullICC
+
+modelFghtNull <- lmer(FightingStd ~ 1 + (1|Rater), data = dataLong)
+v_u <- as.numeric(VarCorr(modelFghtNull)$Rater[1])  # between-rater variance
+v_e <- sigma(modelFghtNull)^2                       # within-rater variance
+FghtNullICC <- v_u / (v_u + v_e)
+FghtNullICC
+```
+
+#### Random Intercepts
+
+Fit the full model, recover ICC
+
+```{r}
+
+modelAttrMixed <- lmer(AttractivenessStd ~ 1 + fWHRStd + FFAStd + fWHRStd*FFAStd + BMIStd + AgeStd + (1|Rater), data = dataLong)
+
+v_u <- as.numeric(VarCorr(modelAttrMixed)$Rater[1])  # between-rater variance
+v_e <- sigma(modelAttrMixed)^2                       # within-rater variance
+AttrICC <- v_u / (v_u + v_e)
+AttrICC
+
+AttrMixedRobustCR <- vcovCR(modelAttrMixed,  cluster = dataLong$Rater, type = "CR2")
+
+AttrMixedRobustSE <- sqrt(diag(AttrMixedRobustCR))
+
+modelFghtMixed <- lmer(FightingStd ~ 1 + fWHRStd + FFAStd + BMIStd + AgeStd + (1|Rater), data = dataLong)
+
+v_u <- as.numeric(VarCorr(modelFghtMixed)$Rater[1])  # between-rater variance
+v_e <- sigma(modelFghtMixed)^2                       # within-rater variance
+FghtICC <- v_u / (v_u + v_e)
+FghtICC
+
+FghtMixedRobustCR <- vcovCR(modelFghtMixed,  cluster = dataLong$Rater, type = "CR2")
+
+FghtMixedRobustSE <- sqrt(diag(FghtMixedRobustCR))
+
+stargazer(modelAttrMixed, modelFghtMixed, se=list(AttrMixedRobustSE, FghtMixedRobustSE), type="text")
+```
+
+#### Satterthwaite t-tests
+
+```{r}
+
+AttrMixedTest <- coef_test(modelAttrMixed, vcov=AttrMixedRobustCR, test = "Satterthwaite")
+
+FghtMixedTest <- coef_test(modelFghtMixed, vcov=FghtMixedRobustCR, test = "Satterthwaite")
+
+AttrMixedTest
+
+FghtMixedTest
+```
+
+### Clustered Ordered Logit
+
+```{r}
+
+modelAttrOrdered <- polr(
+  Attractiveness ~ fWHRStd + FFAStd + fWHRStd*FFAStd + BMIStd + AgeStd,
+  data = dataLong, method = "logistic", Hess = TRUE
+)
+
+AttrOrderedRobustCL <- vcovCL(modelAttrOrdered,  cluster = dataLong$Rater, type = "HC1", cadjust = TRUE)
+
+#AttrOrderedRobustHC <- vcovCL(modelAttrOrdered,  cluster = 1:length(dataLong$Rater), type = "HC1", cadjust=FALSE)
+
+AttrOrderedRobustSE <- sqrt(diag(AttrOrderedRobustCL))
+
+modelFghtOrdered <- polr(
+  Fighting ~ fWHRStd + FFAStd + BMIStd + AgeStd, 
+  data = dataLong, method = "logistic", Hess = TRUE
+  )
+
+FghtOrderedRobustCL <- vcovCL(modelFghtOrdered,  cluster = dataLong$Rater, type = "HC1", cadjust = TRUE)
+
+#FghtOrderedRobustHC <- vcovCL(modelFghtOrdered,  cluster = 1:length(dataLong$Rater), type = "HC1", cadjust=FALSE)
+
+FghtOrderedRobustSE <- sqrt(diag(FghtOrderedRobustCL))
+
+
+
+stargazer(modelAttrOrdered, modelFghtOrdered, se=list(AttrOrderedRobustSE, FghtOrderedRobustSE), type="text")
+```
+
+```{r}
+
+AttrOrderedTest <- coeftest(modelAttrOrdered, vcov.=AttrOrderedRobustCL)
+
+FghtOrderedTest <- coeftest(modelFghtOrdered, vcov.=FghtOrderedRobustCL)
+
+AttrOrderedTest
+
+FghtOrderedTest
+```
+
+### Print tables
+
+#### Set up
+
+```{r}
+
+# Which rows to show (and in what order)
+AttrTermOrder <- c("FFAStd", "fWHRStd", "fWHRStd:FFAStd", "BMIStd", "AgeStd")
+
+FghtTermOrder <- c("FFAStd", "fWHRStd", "BMIStd", "AgeStd")
+
+# Pretty labels for the leftmost "Variable" column
+AttrTermsMap <- c(
+  "FFAStd"  = "FFA (z)",
+  "fWHRStd" = "fWHR (z)",
+  "fWHRStd:FFAStd" = "fWHR × FFA",
+  "BMIStd"  = "BMI (z)",
+  "AgeStd" = "Age (z)"
+)
+
+# Pretty labels for the leftmost "Variable" column
+FghtTermsMap <- c(
+  "FFAStd"  = "FFA (z)",
+  "fWHRStd" = "fWHR (z)",
+  "BMIStd"  = "BMI (z)",
+  "AgeStd" = "Age (z)"
+)
+
+AttrVar <- unname(AttrTermsMap)
+FghtVar <- unname(FghtTermsMap)
+```
+
+#### OLS HC
+
+##### Attractiveness
+
+```{r}
+
+# Table for main OLS
+
+AttrOrderOLSHC <- match(AttrTermOrder, rownames(AttrTest))
+
+AttrRejectionOLSHC <- qt(1 - alpha/2, df=modelAttr$df.residual)
+
+AttrEstimatesOLSHC <- AttrTest[,"Estimate"][AttrOrderOLSHC]
+
+AttrErrorsOLSHC <- AttrTest[,"Std. Error"][AttrOrderOLSHC]
+
+AttrLowerOLSHC <- round(AttrEstimatesOLSHC - AttrRejectionOLSHC * AttrErrorsOLSHC, digits=3)
+
+AttrUpperOLSHC <- round(AttrEstimatesOLSHC + AttrRejectionOLSHC * AttrErrorsOLSHC, digits=3)
+
+AttrConfIntOLSHC <- paste0("[", AttrLowerOLSHC, " ,", AttrUpperOLSHC, "]")
+  
+AttrStatOLSHC <- round(AttrTest[,"t value"][AttrOrderOLSHC], digits=3)
+
+AttrPvalueOLSHC <- round(AttrTest[,"Pr(>|t|)"][AttrOrderOLSHC], digits=3)
+
+AttrOLSHC <- data.frame(Variable=AttrVar, Estimate=as.character(round(AttrEstimatesOLSHC, digits=3)), SE=round(AttrErrorsOLSHC, digits=3), CI=AttrConfIntOLSHC, StatType="t", Stat=AttrStatOLSHC, df=paste0("(", modelAttr$df.residual, ")"), p=AttrPvalueOLSHC, n=nobs(modelAttr), clusters="\u2014")
+```
+
+##### Fighting
+
+```{r}
+
+# Table for main OLS
+
+FghtOrderOLSHC <- match(FghtTermOrder, rownames(FghtTest))
+
+FghtRejectionOLSHC <- qt(1 - alpha/2, df=modelFght$df.residual)
+
+FghtEstimatesOLSHC <- FghtTest[,"Estimate"][FghtOrderOLSHC]
+
+FghtErrorsOLSHC <- FghtTest[,"Std. Error"][FghtOrderOLSHC]
+
+FghtLowerOLSHC <- round(FghtEstimatesOLSHC - FghtRejectionOLSHC * FghtErrorsOLSHC, digits=3)
+
+FghtUpperOLSHC <- round(FghtEstimatesOLSHC + FghtRejectionOLSHC * FghtErrorsOLSHC, digits=3)
+
+FghtConfIntOLSHC <- paste0("[", FghtLowerOLSHC, " ,", FghtUpperOLSHC, "]")
+  
+FghtStatOLSHC <- round(FghtTest[,"t value"][FghtOrderOLSHC], digits=3)
+
+FghtPvalueOLSHC <- round(FghtTest[,"Pr(>|t|)"][FghtOrderOLSHC], digits=3)
+
+FghtOLSHC <- data.frame(Variable=FghtVar, Estimate=as.character(round(FghtEstimatesOLSHC, digits=3)), SE=round(FghtErrorsOLSHC, digits=3), CI=FghtConfIntOLSHC, StatType="t", Stat=FghtStatOLSHC, df=paste0("(", modelFght$df.residual, ")"), p=FghtPvalueOLSHC, n=nobs(modelFght), clusters="\u2014")
+```
+
+#### Pooled OLS CR2 + Satterthwaite
+
+##### Attractiveness
+
+```{r}
+
+# Table for clustered OLS with finite sample correction
+
+AttrOrderOLSCR <- match(AttrTermOrder, AttrClustTest[,"Coef"])
+
+AttrRejectionOLSCR <- qt(1 - alpha/2, df=AttrClustTest[, "df_Satt"][AttrOrderOLSCR])
+
+AttrEstimatesOLSCR <- AttrClustTest[,"beta"][AttrOrderOLSCR]
+
+AttrErrorsOLSCR <- AttrClustTest[,"SE"][AttrOrderOLSCR]
+
+AttrLowerOLSCR <- round(AttrEstimatesOLSCR - AttrRejectionOLSCR * AttrErrorsOLSCR, digits=3)
+
+AttrUpperOLSCR <- round(AttrEstimatesOLSCR + AttrRejectionOLSCR * AttrErrorsOLSCR, digits=3)
+
+AttrConfIntOLSCR <- paste0("[", AttrLowerOLSCR, " ,", AttrUpperOLSCR, "]")
+  
+AttrStatOLSCR <- round(AttrClustTest[,"tstat"][AttrOrderOLSCR], digits=3)
+
+AttrPvalueOLSCR <- round(AttrClustTest[,"p_Satt"][AttrOrderOLSCR], digits=3)
+
+AttrOLSCR <- data.frame(Variable=AttrVar, Estimate=as.character(round(AttrEstimatesOLSCR, digits=3)), SE=round(AttrErrorsOLSCR, digits=3), CI=AttrConfIntOLSCR, StatType="t", Stat=AttrStatOLSCR, df=paste0("(", round(AttrClustTest[, "df_Satt"][AttrOrderOLSCR], digits = 3), ")"), p=AttrPvalueOLSCR, n=nobs(modelAttrClust), clusters="11")
+```
+
+##### Fighting
+
+```{r}
+
+# Table for clustered OLS with finite sample correction
+
+FghtOrderOLSCR <- match(FghtTermOrder, FghtClustTest[,"Coef"])
+
+FghtRejectionOLSCR <- qt(1 - alpha/2, df=FghtClustTest[, "df_Satt"][FghtOrderOLSCR])
+
+FghtEstimatesOLSCR <- FghtClustTest[,"beta"][FghtOrderOLSCR]
+
+FghtErrorsOLSCR <- FghtClustTest[,"SE"][FghtOrderOLSCR]
+
+FghtLowerOLSCR <- round(FghtEstimatesOLSCR - FghtRejectionOLSCR * FghtErrorsOLSCR, digits=3)
+
+FghtUpperOLSCR <- round(FghtEstimatesOLSCR + FghtRejectionOLSCR * FghtErrorsOLSCR, digits=3)
+
+FghtConfIntOLSCR <- paste0("[", FghtLowerOLSCR, " ,", FghtUpperOLSCR, "]")
+  
+FghtStatOLSCR <- round(FghtClustTest[,"tstat"][FghtOrderOLSCR], digits=3)
+
+FghtPvalueOLSCR <- round(FghtClustTest[,"p_Satt"][FghtOrderOLSCR], digits=3)
+
+FghtOLSCR <- data.frame(Variable=FghtVar, Estimate=as.character(round(FghtEstimatesOLSCR, digits=3)), SE=round(FghtErrorsOLSCR, digits=3), CI=FghtConfIntOLSCR, StatType="t", Stat=FghtStatOLSCR, df=paste0("(", round(FghtClustTest[, "df_Satt"][FghtOrderOLSCR], digits = 3), ")"), p=FghtPvalueOLSCR, n=nobs(modelFghtClust), clusters="11")
+```
+
+#### Pooled OLS WCR
+
+##### Attractiveness
+
+```{r}
+
+# Table for clustered OLS with empirical WCR correction
+
+AttrEstimatesOLSWCR <- round(c(
+  bt_atr_ffa$point_estimate,
+  bt_atr_fWHR$point_estimate, 
+  bt_atr_fWHR_ffa$point_estimate, 
+  bt_atr_bmi$point_estimate, 
+  bt_atr_age$point_estimate
+), digits=3)
+
+AttrConfIntOLSWCR <- round(c(
+  bt_atr_ffa$conf_int,
+  bt_atr_fWHR$conf_int,
+  bt_atr_fWHR_ffa$conf_int,
+  bt_atr_bmi$conf_int,
+  bt_atr_age$conf_int
+), digits = 3)
+  
+AttrConfIntOLSWCR <- matrix(AttrConfIntOLSWCR, ncol = 2, byrow = TRUE)
+
+AttrConfIntOLSWCR <- apply(AttrConfIntOLSWCR, 1, function(x) paste0("[", paste(x, collapse = ", "), "]"))
+
+AttrStatOLSWCR <- round(c(
+  bt_atr_ffa$t_stat,
+  bt_atr_fWHR$t_stat, 
+  bt_atr_fWHR_ffa$t_stat, 
+  bt_atr_bmi$t_stat, 
+  bt_atr_age$t_stat
+), digits=3)
+
+AttrPvalueOLSWCR <- round(c(
+  bt_atr_ffa$p_val,
+  bt_atr_fWHR$p_val, 
+  bt_atr_fWHR_ffa$p_val, 
+  bt_atr_bmi$p_val, 
+  bt_atr_age$p_val
+), digits=3)
+
+AttrOLSWCR <- data.frame(Variable=AttrVar, Estimate=AttrEstimatesOLSWCR, SE="\u2014", CI=AttrConfIntOLSWCR, StatType="t", Stat=AttrStatOLSWCR, df="", p=AttrPvalueOLSWCR, n=nobs(modelAttrWCR), clusters="11")
+```
+
+##### Fighting
+
+```{r}
+
+# Table for clustered OLS with empirical WCR correction
+
+FghtEstimatesOLSWCR <- round(c(
+  bt_fight_ffa$point_estimate,
+  bt_fight_fWHR$point_estimate, 
+  bt_fight_bmi$point_estimate, 
+  bt_fight_age$point_estimate
+), digits=3)
+
+FghtConfIntOLSWCR <- round(c(
+  bt_fight_ffa$conf_int,
+  bt_fight_fWHR$conf_int,
+  bt_fight_bmi$conf_int,
+  bt_fight_age$conf_int
+), digits = 3)
+  
+FghtConfIntOLSWCR <- matrix(FghtConfIntOLSWCR, ncol = 2, byrow = TRUE)
+
+FghtConfIntOLSWCR <- apply(FghtConfIntOLSWCR, 1, function(x) paste0("[", paste(x, collapse = ", "), "]"))
+
+FghtStatOLSWCR <- round(c(
+  bt_fight_ffa$t_stat,
+  bt_fight_fWHR$t_stat, 
+  bt_fight_bmi$t_stat, 
+  bt_fight_age$t_stat
+), digits=3)
+
+FghtPvalueOLSWCR <- round(c(
+  bt_fight_ffa$p_val,
+  bt_fight_fWHR$p_val, 
+  bt_fight_bmi$p_val, 
+  bt_fight_age$p_val
+), digits=3)
+
+FghtOLSWCR <- data.frame(Variable=FghtVar, Estimate=FghtEstimatesOLSWCR, SE="\u2014", CI=FghtConfIntOLSWCR, StatType="t", Stat=FghtStatOLSWCR, df="", p=FghtPvalueOLSWCR, n=nobs(modelFghtWCR), clusters="11")
+```
+
+#### Pooled Random Intercept
+
+##### Attractiveness
+
+```{r}
+
+# Table for mixed model with random intercepts
+
+AttrOrderMixed <- match(AttrTermOrder, AttrMixedTest[,"Coef"])
+
+AttrRejectionMixed <- qt(1 - alpha/2, df=AttrMixedTest[, "df_Satt"][AttrOrderMixed])
+
+AttrEstimatesMixed <- AttrMixedTest[,"beta"][AttrOrderMixed]
+
+AttrErrorsMixed <- AttrMixedTest[,"SE"][AttrOrderMixed]
+
+AttrLowerMixed <- round(AttrEstimatesMixed - AttrRejectionMixed * AttrErrorsMixed, digits=3)
+
+AttrUpperMixed <- round(AttrEstimatesMixed + AttrRejectionMixed * AttrErrorsMixed, digits=3)
+
+AttrConfIntMixed <- paste0("[", AttrLowerMixed, " ,", AttrUpperMixed, "]")
+  
+AttrStatMixed <- as.character(round(AttrMixedTest[,"tstat"][AttrOrderMixed], digits=3))
+
+AttrPvalueMixed <- round(AttrMixedTest[,"p_Satt"][AttrOrderMixed], digits=3)
+
+AttrMixed <- data.frame(Variable=AttrVar, Estimate=round(AttrEstimatesMixed, digits=3), SE=round(AttrErrorsMixed, digits=3), CI=AttrConfIntMixed, StatType="t", Stat=AttrStatMixed, df=paste0("(", round(AttrMixedTest[, "df_Satt"][AttrOrderMixed], digits=3), ")"), p=AttrPvalueMixed, n=nobs(modelAttrMixed), clusters="11")
+```
+
+##### Fighting
+
+```{r}
+
+# Table for mixed model with random intercepts
+
+FghtOrderMixed <- match(FghtTermOrder, FghtMixedTest[,"Coef"])
+
+FghtRejectionMixed <- qt(1 - alpha/2, df=FghtMixedTest[, "df_Satt"][FghtOrderMixed])
+
+FghtEstimatesMixed <- FghtMixedTest[,"beta"][FghtOrderMixed]
+
+FghtErrorsMixed <- FghtMixedTest[,"SE"][FghtOrderMixed]
+
+FghtLowerMixed <- round(FghtEstimatesMixed - FghtRejectionMixed * FghtErrorsMixed, digits=3)
+
+FghtUpperMixed <- round(FghtEstimatesMixed + FghtRejectionMixed * FghtErrorsMixed, digits=3)
+
+FghtConfIntMixed <- paste0("[", FghtLowerMixed, " ,", FghtUpperMixed, "]")
+  
+FghtStatMixed <- round(FghtMixedTest[,"tstat"][FghtOrderMixed], digits=3)
+
+FghtPvalueMixed <- round(FghtMixedTest[,"p_Satt"][FghtOrderMixed], digits=3)
+
+FghtMixed <- data.frame(Variable=FghtVar, Estimate=round(FghtEstimatesMixed, digits=3), SE=round(FghtErrorsMixed, digits=3), CI=FghtConfIntMixed, StatType="t", Stat=FghtStatMixed, df=paste0("(", round(FghtMixedTest[, "df_Satt"][FghtOrderMixed], digits=3), ")"), p=FghtPvalueMixed, n=nobs(modelFghtMixed), clusters="11")
+```
+
+#### Pooled Ordered
+
+##### Attractiveness
+
+```{r}
+
+# Table for the ordered model
+
+AttrOrderOrdered <- match(AttrTermOrder, rownames(AttrOrderedTest))
+
+AttrRejectionOrdered <- qt(1 - alpha/2, df=attr(AttrOrderedTest, "df"))
+
+AttrEstimatesOrdered <- AttrOrderedTest[,"Estimate"][AttrOrderOrdered]
+
+AttrErrorsOrdered <- AttrOrderedTest[,"Std. Error"][AttrOrderOrdered]
+
+AttrLowerOrdered <- round(AttrEstimatesOrdered - AttrRejectionOrdered * AttrErrorsOrdered, digits=3)
+
+AttrUpperOrdered <- round(AttrEstimatesOrdered + AttrRejectionOrdered * AttrErrorsOrdered, digits=3)
+
+AttrConfIntOrdered <- ifelse(
+  is.na(AttrLowerOrdered) | is.na(AttrUpperOrdered), 
+  "", 
+  paste0("[", AttrLowerOrdered, " ,", AttrUpperOrdered, "]")
+)
+  
+AttrStatOrdered <- round(AttrOrderedTest[,"t value"][AttrOrderOrdered], digits=3)
+
+AttrPvalueOrdered <- round(AttrOrderedTest[,"Pr(>|t|)"][AttrOrderOrdered], digits=3)
+
+AttrOrdered <- data.frame(Variable=AttrVar, Estimate=round(AttrEstimatesOrdered, digits=3), SE=round(AttrErrorsOrdered, digits=3), CI=AttrConfIntOrdered, StatType="z", Stat=AttrStatOrdered, df="", p=AttrPvalueOrdered, n=nobs(modelAttrOrdered), clusters="11", row.names = NULL)
+
+```
+
+##### Fighting
+
+```{r}
+
+# Table for the ordered model
+
+FghtOrderOrdered <- match(FghtTermOrder, rownames(FghtOrderedTest))
+
+FghtRejectionOrdered <- qt(1 - alpha/2, df=attr(FghtOrderedTest, "df"))
+
+FghtEstimatesOrdered <- FghtOrderedTest[,"Estimate"][FghtOrderOrdered]
+
+FghtErrorsOrdered <- FghtOrderedTest[,"Std. Error"][FghtOrderOrdered]
+
+FghtLowerOrdered <- round(FghtEstimatesOrdered - FghtRejectionOrdered * FghtErrorsOrdered, digits=3)
+
+FghtUpperOrdered <- round(FghtEstimatesOrdered + FghtRejectionOrdered * FghtErrorsOrdered, digits=3)
+
+FghtConfIntOrdered <- ifelse(
+  is.na(FghtLowerOrdered) | is.na(FghtUpperOrdered), 
+  "", 
+  paste0("[", FghtLowerOrdered, " ,", FghtUpperOrdered, "]")
+)
+
+FghtStatOrdered <- as.character(round(FghtOrderedTest[,"t value"][FghtOrderOrdered], digits=3))
+
+FghtPvalueOrdered <- round(FghtOrderedTest[,"Pr(>|t|)"][FghtOrderOrdered], digits=3)
+
+FghtOrdered <- data.frame(Variable=FghtVar, Estimate=round(FghtEstimatesOrdered, digits=3), SE=round(FghtErrorsOrdered, digits=3), CI=FghtConfIntOrdered, StatType="z", Stat=FghtStatOrdered, df="", p=FghtPvalueOrdered, n=nobs(modelFghtOrdered), clusters="11", row.names = NULL)
+
+```
+
+#### Consolidate tables
+
+```{r}
+
+# Helper: build "N=...,<br>Clusters=..." for a given spec df
+formatN <- function(df) {
+  n  <- df$n[1]
+  cl <- df$clusters[1]
+  paste0("N=", n, "<br>Clusters=", cl)
+}
+
+# Build cell (4 lines)
+mk_cell <- function(df) {
+  stars <- vapply(df$p, sig_code, FUN.VALUE = character(1))
+  line1 <- ifelse(df$Estimate=="", "\u2014", paste0("**", df$Estimate, "**", stars)) |> block()
+  line2 <- ifelse(df$SE=="", "", paste0("(", df$SE, ")")) |> block()
+  line3 <- df$CI |> block()
+  line4 <- mapply(StatlineFunction, df$StatType, df$Stat, df$p, df$df, SIMPLIFY = TRUE, USE.NAMES = FALSE) |> block()
+  paste0(line1, line2, line3, line4)
+}
+```
+
+##### Attractiveness
+
+```{r}
+
+AttrOLSHC$Cell   <- mk_cell(AttrOLSHC)
+AttrOLSCR$Cell   <- mk_cell(AttrOLSCR)
+AttrOLSWCR$Cell  <- mk_cell(AttrOLSWCR)
+AttrMixed$Cell   <- mk_cell(AttrMixed)
+AttrOrdered$Cell <- mk_cell(AttrOrdered)
+
+# Reduce to one wide table
+AttrWide <- Reduce(
+  function(x, y) dplyr::left_join(x, y, by = "Variable"),
+  list(
+    dplyr::transmute(AttrOLSHC,  Variable, `OLS–HC3`          = Cell),
+    dplyr::transmute(AttrOLSCR,  Variable, `OLS–CR2 (Satt)`   = Cell),
+    dplyr::transmute(AttrOLSWCR, Variable, `WCR`              = Cell),
+    dplyr::transmute(AttrMixed,  Variable, `Mixed–CR2 (Satt)` = Cell),
+    dplyr::transmute(AttrOrdered,Variable, `Ordered–HC1`      = Cell)
+  )
+)
+
+# Add observations row
+AttrNClus <- data.frame(
+  Variable              = "Observations",
+  `OLS–HC3`             = formatN(AttrOLSHC),
+  `OLS–CR2 (Satt)`      = formatN(AttrOLSCR),
+  `WCR`                 = formatN(AttrOLSWCR),
+  `Mixed–CR2 (Satt)`    = formatN(AttrMixed),
+  `Ordered–HC1`         = formatN(AttrOrdered),
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+
+AttrWide <- dplyr::bind_rows(AttrWide, AttrNClus)
+```
+
+##### Fighting
+
+```{r}
+
+FghtOLSHC$Cell   <- mk_cell(FghtOLSHC)
+FghtOLSCR$Cell   <- mk_cell(FghtOLSCR)
+FghtOLSWCR$Cell  <- mk_cell(FghtOLSWCR)
+FghtMixed$Cell   <- mk_cell(FghtMixed)
+FghtOrdered$Cell <- mk_cell(FghtOrdered)
+
+FghtWide <- Reduce(
+  function(x, y) dplyr::left_join(x, y, by = "Variable"),
+  list(
+    dplyr::transmute(FghtOLSHC,  Variable, `OLS–HC3`          = Cell),
+    dplyr::transmute(FghtOLSCR,  Variable, `OLS–CR2 (Satt)`   = Cell),
+    dplyr::transmute(FghtOLSWCR, Variable, `WCR`              = Cell),
+    dplyr::transmute(FghtMixed,  Variable, `Mixed–CR2 (Satt)` = Cell),
+    dplyr::transmute(FghtOrdered,Variable, `Ordered–HC1`      = Cell)
+  )
+)
+
+# Add observations row
+FghtNClus <- data.frame(
+  Variable              = "Observations",
+  `OLS–HC3`             = formatN(FghtOLSHC),
+  `OLS–CR2 (Satt)`      = formatN(FghtOLSCR),
+  `WCR`                 = formatN(FghtOLSWCR),
+  `Mixed–CR2 (Satt)`    = formatN(FghtMixed),
+  `Ordered–HC1`         = formatN(FghtOrdered),
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+FghtWide <- dplyr::bind_rows(FghtWide, FghtNClus)
+```
+
+##### Merge and print
+
+```{r}
+
+# Merge: prefix columns to avoid name collisions, then join by Variable
+MergedWide <- AttrWide |>
+  dplyr::rename_with(~paste0("A: ", .x), -Variable) |>
+  dplyr::left_join(
+    FghtWide |> dplyr::rename_with(~paste0("F: ", .x), -Variable),
+    by = "Variable"
+  )
+
+MergedWide <- MergedWide %>%
+  mutate(across(-Variable, ~ replace(as.character(.), is.na(.), "\u2014")))
+
+gt_all <- MergedWide |>
+  gt(rowname_col = "Variable") |>
+  # Two spanners: Attractiveness vs Fighting
+  tab_spanner(label = md("**Attractiveness**"),    columns = dplyr::starts_with("A: ")) |>
+  tab_spanner(label = md("**Fighting Ability**"),  columns = dplyr::starts_with("F: ")) |>
+  # Optional: pretty inner labels (same for both sides)
+  cols_label(
+    `A: OLS–HC3` = "Averaged HC", `A: OLS–CR2 (Satt)` = "Pooled CR",
+    `A: WCR` = "Pooled WCR", `A: Mixed–CR2 (Satt)` = "Pooled RI CR", `A: Ordered–HC1` = "Pooled Ordered CR",
+    `F: OLS–HC3` = "Averaged HC", `F: OLS–CR2 (Satt)` = "Pooled CR",
+    `F: WCR` = "Pooled WCR", `F: Mixed–CR2 (Satt)` = "Pooled RI CR", `F: Ordered–HC1` = "Pooled Ordered CR"
+  ) |>
+  tab_options(table.font.size = gt::px(11)) |>
+  fmt_markdown(everything()) |>
+  tab_source_note(md("**Note.** * p<.05, ** p<.01, *** p<.001; † p<.10. Square brackets denote 95% confidence intervals.  HC = Heteroskedasticity-Consistent; CR = Cluster-Robust; WCR = Wild Cluster Restricted; RI = Random Intercepts. Because the averaged model used standardized responses, pooled linear responses were grand-mean centered and scaled to the variance of the averaged outcome, placing coefficients on the same unit-change scale for comparability. This transformation affects only the scale of coefficients, not their statistical inference. Ordered model coefficients are in the log-odds scale. Intercepts were estimated but not reported. All values were rounded to 3 decimal places.")) |>
+  tab_style(
+    style = cell_text(align = "justify"),
+    locations = cells_source_notes()
+  )
+
+gt_all <- gt_all |>
+  # Header left
+  tab_header(title = md("*Table 5. Within-Rater Robustness*")) |>
+  tab_style(
+    style = cell_text(size = px(11), align = "left"),
+    locations = list(
+      cells_title(groups = "title"),
+      cells_title(groups = "subtitle")
+    )
+  ) |>
+  # Body: left-align Variable, center the rest
+  cols_align(align = "left",   columns = "Variable") |>
+  cols_align(align = "center", columns = -Variable) |>
+  # (Optional) center column labels and spanner labels
+  tab_style(style = cell_text(align = "center"),
+            locations = cells_column_labels(columns = everything())) |>
+  tab_style(style = cell_text(align = "center"),
+            locations = cells_column_spanners())
+
+
+gt_all
+```
+
+```{r}
+
+gtsave(gt_all, "WITHIN_RATER_ROBUSTNESS_TABLE.html", inline_css = TRUE)
+
+# higher zoom = sharper text; expand adds padding so nothing gets clipped
+gtsave(
+  gt_all,
+  filename = "WITHIN_RATER_ROBUSTNESS_TABLE.png",
+  vwidth = 1300,
+  expand = 5         # pixels of padding around the table
+)
+```
+
+## Halo effect Robustness Check (SEM)
+
+### Simultaneous SEM (Recursiveness test)
+
+```{r}
+
+averagedData$fWHR_FFA <- with(averagedData, fWHRStd * FFAStd)
+
+model <- '
+  # Attractiveness equation (labels b1..b5)
+  AttractivenessStd ~ b1*FightingStd + b2*FFAStd + b3*fWHR_FFA + b4*BMIStd
+
+  # Fighting equation (labels c1..c5)
+  FightingStd ~ c1*AttractivenessStd + c2*fWHRStd + c3*FFAStd + c4*BMIStd + c5*AgeStd
+'
+
+fit_simul <- sem(model, estimator = "MLR", missing   = "fiml", data = averagedData)
+summary(fit_simul, standardized = TRUE, fit.measures = TRUE, rsquare = TRUE)
+```
+
+#### Instrument Check
+
+```{r}
+
+Attr2SLS <- feols(AttractivenessStd ~ FFAStd + fWHR_FFA + BMIStd | FightingStd ~ fWHRStd + AgeStd, data=averagedData, vcov = "HC1")
+
+Fght2SLS <- feols(FightingStd ~ FFAStd + fWHRStd + BMIStd + AgeStd | AttractivenessStd ~ fWHR_FFA, data=averagedData, vcov = "HC1")
+
+summary(Attr2SLS)
+
+
+fitstat(Attr2SLS, c("ivf1", "kpr", "wh", "sargan"))
+
+summary(Fght2SLS)
+
+fitstat(Fght2SLS, c("ivf1", "kpr", "wh", "sargan"))
+
+
+```
+
+### Recursive SEM
+
+```{r}
+
+averagedData$fWHR_FFA <- with(averagedData, fWHRStd * FFAStd)
+
+model <- '
+  # Attractiveness equation (labels b1..b5)
+  AttractivenessStd ~ b1*fWHRStd + b2*FFAStd + b3*fWHR_FFA + b4*BMIStd + b5*AgeStd
+
+  # Fighting equation (labels c1..c5)
+  FightingStd ~ c1*AttractivenessStd + c2*fWHRStd + c3*FFAStd + c4*BMIStd + c5*AgeStd
+
+  # Conditional indirect effect of FFA via Attractiveness at fWHR = w
+  ind_FFA_wm1 := c1*(b2 + b3*(-1))   # w = -1 SD
+  ind_FFA_w0  := c1*(b2 + b3*0)      # w =  0
+  ind_FFA_w1  := c1*(b2 + b3*(1))    # w = +1 SD
+
+  # Direct effect (does not depend on w)
+  dir_FFA := c3
+
+  # Conditional total effects
+  tot_FFA_wm1 := dir_FFA + ind_FFA_wm1
+  tot_FFA_w0  := dir_FFA + ind_FFA_w0
+  tot_FFA_w1  := dir_FFA + ind_FFA_w1
+'
+
+fit_recur <- sem(model, estimator = "MLR", missing   = "fiml", data = averagedData)
+summary(fit_recur, standardized = TRUE, fit.measures = TRUE, rsquare = TRUE)
+parameterEstimates(fit_recur, standardized = TRUE)[, c("label","lhs","op","rhs","est","se","pvalue")]
+```
+
+### Print tables
+
+```{r}
+
+# Add this:
+sig_stars <- function(p) {
+  if (is.na(p)) return("")
+  if (p < .001) return("<sup>***</sup>")
+  if (p < .01)  return("<sup>**</sup>")
+  if (p < .05)  return("<sup>*</sup>")
+  if (p < .10)  return("<sup>\u2020</sup>")  # dagger for 10%
+  return("")
+}
+
+# -------- helpers (reuse your fmt_p) --------
+fmt_p <- function(p) ifelse(is.na(p), "", ifelse(p < .001, "<.001", sprintf("%.3f", p)))
+
+
+# Replace your mk_cell() with this version:
+block <- function(x) ifelse(is.na(x) | x == "", "", paste0(
+  "<span style='display:block; white-space:nowrap;'>", x, "</span>"
+))
+
+mk_cell <- function(est, se, z, p, lo, hi) {
+  star  <- sig_stars(p)
+  line1 <- ifelse(is.na(est), "", paste0("**", sprintf("%.3f", est), "**", star)) |> block()
+  line2 <- ifelse(is.na(se),  "", paste0("(", sprintf("%.3f", se), ")")) |> block()
+  line3 <- ifelse(is.na(lo) | is.na(hi), "", paste0("[", sprintf("%.3f", lo), ", ", sprintf("%.3f", hi), "]")) |> block()
+  line4 <- ifelse(is.na(z) | is.na(p), "", paste0("z=", sprintf("%.3f", z), ", p=", fmt_p(p))) |> block()
+  paste0(line1, line2, line3, line4)
+}
+
+lavaan_reg_tidy <- function(fit, model_name) {
+  pe <- parameterEstimates(fit, standardized = TRUE, ci = TRUE)
+  pe <- dplyr::filter(pe, op == "~")
+  tibble::tibble(
+    Model    = model_name,
+    Equation = pe$lhs,
+    Predictor= pe$rhs,
+    est      = pe$est,
+    se       = pe$se,
+    z        = pe$z,
+    p        = pe$pvalue,
+    lo       = pe$ci.lower,
+    hi       = pe$ci.upper
+  ) |>
+  # 👇 build one HTML cell per row (scalar calls)
+  dplyr::mutate(Cell = mapply(mk_cell, est, se, z, p, lo, hi, USE.NAMES = FALSE)) |>
+  dplyr::select(Model, Equation, Predictor, Cell)
+}
+
+
+# -------- R² per equation (to show as a dedicated row) --------
+lavaan_r2_tidy <- function(fit, model_name) {
+  r2 <- as.numeric(inspect(fit, "r2"))
+  if (length(r2) == 0) return(tibble::tibble())
+  eqs <- names(inspect(fit, "r2"))
+  tibble::tibble(
+    Model    = model_name,
+    Equation = eqs,
+    Predictor= "R\u00b2",   # will become the row label
+    Cell     = paste0("**", sprintf("%.3f", r2), "**")
+  )
+}
+
+# -------- N (observations) per model/equation --------
+# Uses lavaan's total N (accounts for FIML). If you prefer per-group, swap to nobs(fit).
+lavaan_n_tidy <- function(fit, model_name) {
+  # total sample size (across groups) as reported by lavaan
+  n_total <- as.integer(lavaan::fitMeasures(fit, "ntotal"))
+
+  # figure out which equations exist in this fit (lhs of regressions)
+  eqs <- unique(dplyr::filter(lavaan::parameterEstimates(fit), op == "~")$lhs)
+  if (length(eqs) == 0) return(tibble::tibble())
+
+  tibble::tibble(
+    Model    = model_name,
+    Equation = eqs,
+    Predictor= "Observations",
+    Cell     = paste0(format(n_total, big.mark = ","))
+  ) |>
+  dplyr::mutate(
+    Col = paste0(Model, " \u2014 ",
+                 dplyr::if_else(Equation == "AttractivenessStd", "Attractiveness", "Fighting"))
+  ) |>
+  dplyr::transmute(Predictor, Col, Cell)
+}
+
+# -------- build long (both models), then pivot wider --------
+rec_long <- lavaan_reg_tidy(fit_recur,  "Recursive")
+sim_long <- lavaan_reg_tidy(fit_simul,  "Simultaneous")
+
+pred_order <- c(
+  "FFAStd","fWHRStd","fWHR_FFA","BMIStd","AgeStd","AttractivenessStd","FightingStd",
+  "Total FFA at fWHR = -1 SD",
+  "Total FFA at fWHR = 0 SD",
+  "Total FFA at fWHR = +1 SD",
+  "R\u00b2",
+  "Observations"
+)
+
+long_all <- dplyr::bind_rows(rec_long, sim_long) |>
+  # keep only predictors that appear in any equation (the join will em-dash the rest)
+  dplyr::filter(Predictor %in% unique(c(pred_order, Predictor))) |>
+  # make a nice column name per model × equation
+  dplyr::mutate(Col = paste0(Model, " — ", dplyr::if_else(Equation == "AttractivenessStd", "Attractiveness", "Fighting"))) |>
+  dplyr::select(Predictor, Col, Cell)
+
+# add R² as its own "predictor" row
+rec_r2 <- lavaan_r2_tidy(fit_recur, "Recursive") |>
+  dplyr::mutate(Col = paste0(Model, " — ", dplyr::if_else(Equation == "AttractivenessStd", "Attractiveness", "Fighting"))) |>
+  dplyr::transmute(Predictor = "R\u00b2", Col, Cell)
+
+sim_r2 <- lavaan_r2_tidy(fit_simul, "Simultaneous") |>
+  dplyr::mutate(Col = paste0(Model, " — ", dplyr::if_else(Equation == "AttractivenessStd", "Attractiveness", "Fighting"))) |>
+  dplyr::transmute(Predictor = "R\u00b2", Col, Cell)
+
+long_all <- dplyr::bind_rows(long_all, rec_r2, sim_r2)
+
+# --- extract total effects from recursive fit
+pe_rec  <- parameterEstimates(fit_recur, standardized = TRUE, ci = TRUE)
+
+tot_labels <- c("tot_FFA_wm1","tot_FFA_w0","tot_FFA_w1")
+tot_names <- c("-1 SD","0 SD","+1 SD")  # no leading space before +1
+
+tot_rows <- dplyr::filter(pe_rec, op == ":=", label %in% tot_labels)
+
+# build tidy tibble with one row per total effect
+tot_long <- tibble::tibble(
+  Predictor = paste0("Total FFA at fWHR = ",
+                     tot_names[match(tot_rows$label, tot_labels)]),
+  Col       = "Recursive \u2014 Fighting",
+  Cell      = mapply(
+    mk_cell,
+    est = tot_rows$est,
+    se  = tot_rows$se,
+    z   = tot_rows$z,
+    p   = tot_rows$pvalue,
+    lo  = tot_rows$ci.lower,
+    hi  = tot_rows$ci.upper,
+    USE.NAMES = FALSE
+  )
+)
+
+
+# append totals to your long data
+long_all <- dplyr::bind_rows(long_all, tot_long)
+
+
+# build N rows
+rec_n <- lavaan_n_tidy(fit_recur, "Recursive")
+sim_n <- lavaan_n_tidy(fit_simul, "Simultaneous")
+
+# append ONLY N
+long_all <- dplyr::bind_rows(long_all, rec_n, sim_n)
+
+# pivot to wide: one column per equation per model
+wide_eq <- tidyr::pivot_wider(long_all, names_from = Col, values_from = Cell) |>
+  # order rows by your preferred predictor order, with R² at bottom
+  dplyr::mutate(Predictor = factor(Predictor, levels = pred_order)) |>
+  dplyr::arrange(Predictor) |>
+  dplyr::mutate(dplyr::across(-Predictor, ~ ifelse(is.na(.x) | .x == "", "\u2014", .x)))
+
+pretty_map <- c(
+  "FFAStd"="FFA (z)", "fWHRStd"="fWHR (z)", "fWHR_FFA"="fWHR × FFA",
+  "BMIStd"="BMI (z)", "AgeStd"="Age (z)", "AttractivenessStd"="Attractiveness (z)",
+  "FightingStd"="Fighting Ability (z)", "R\u00b2"="R\u00b2",
+  "Total FFA at fWHR = -1 SD"="Total FFA at fWHR = −1 SD",
+  "Total FFA at fWHR = 0 SD" ="Total FFA at fWHR = 0 SD",
+  "Total FFA at fWHR = +1 SD"="Total FFA at fWHR = +1 SD",
+  "Observations"="Observations"
+)
+
+wide_eq$Predictor <- unname(pretty_map[as.character(wide_eq$Predictor)])
+
+
+# -------- pretty print with gt (side-by-side columns) --------
+
+gt_sem_wide_eq <- wide_eq |>
+  gt(rowname_col = "Predictor") |>
+  # spanners for models
+  tab_spanner(label = md("**Recursive**"),
+              columns = tidyselect::matches("^Recursive \u2014 ")) |>
+  tab_spanner(label = md("**Simultaneous**"),
+              columns = tidyselect::matches("^Simultaneous \u2014 ")) |>
+  # clean column labels
+  cols_label(
+    .list = setNames(
+      nm = names(wide_eq)[-1],
+      object = gsub("^(Recursive|Simultaneous) \u2014 ", "", names(wide_eq)[-1])
+    )
+  ) |>
+  # but keep panes separated under spanners (labels applied above)
+  fmt_markdown(everything()) |>
+  tab_header(title = md("*Table 6. Halo Effect Robustness*")) |>
+  tab_options(table.font.size = gt::px(11)) |>
+  cols_align(align = "left",   columns = "Predictor") |>
+  cols_align(align = "center", columns = -Predictor) |>
+  tab_style(
+    style = cell_text(size = px(11), align = "left"),
+    locations = list(
+      cells_title(groups = "title"),
+      cells_title(groups = "subtitle")
+    )
+  ) |>
+  tab_source_note(md("**Notes.** Models on target-level averages (mean of 11 independent raters) for perceived attractiveness and fighting ability. * p<.05, ** p<.01, *** p<.001; † p<.10. Square brackets denote 95% confidence intervals. Models estimated with robust maximum likelihood (MLR). Total effects inference uses the delta method. Observations denote the total FIML sample size. Global fit indices are not reported because the recursive model is just-identified. Models estimated with intercepts; omitted here as variables are standardized and coefficients are not meaningful. All values were rounded to 3 decimal places.")) |>
+  tab_style(
+    style = cell_text(align = "justify"),
+    locations = cells_source_notes()
+  )
+
+
+gt_sem_wide_eq <- gt_sem_wide_eq |>
+  cols_label(
+    `Recursive — Attractiveness`     = "Attractiveness (z)",
+    `Simultaneous — Attractiveness`  = "Attractiveness (z)",
+    `Recursive — Fighting`           = "Fighting Ability (z)",
+    `Simultaneous — Fighting`        = "Fighting Ability (z)"
+  )
+
+gt_sem_wide_eq
+```
+
+```{r}
+
+# Save as PNG/HTML
+gtsave(gt_sem_wide_eq, "SEM_HALO_ROBUSTNESS_TABLE.png", vwidth = 720, expand = 5)
+gtsave(gt_sem_wide_eq, "SEM_HALO_ROBUSTNESS_TABLE.html", inline_css = TRUE)
+```
+
+## Generalizability study
+
+One facet crossed design targets x raters (p x i)
+
+```{r}
+
+k <- 11
+
+AttrGen <- lmer(AttractivenessStd ~ 1 + (1|Cod) + (1|Rater), data = dataLong)
+
+AttrSigmaTar  <- as.numeric(VarCorr(AttrGen)$Cod[1])
+AttrSigmaRat  <- as.numeric(VarCorr(AttrGen)$Rater[1])
+AttrSigmaError <- sigma(AttrGen)^2
+
+FghtGen <- lmer(FightingStd ~ 1 + (1|Cod) + (1|Rater), data = dataLong)
+
+FghtSigmaTar  <- as.numeric(VarCorr(FghtGen)$Cod[1])
+FghtSigmaRat  <- as.numeric(VarCorr(FghtGen)$Rater[1])
+FghtSigmaError <- sigma(FghtGen)^2
+
+# ------------- RELIABILITY ATTRACTIVENESS ---------------
+
+AttrSingleRaterG  <- AttrSigmaTar / (AttrSigmaTar + AttrSigmaError)
+AttrSingleRaterPhi <- AttrSigmaTar / (AttrSigmaTar + AttrSigmaRat + AttrSigmaError)
+
+c(AttrSingleG = AttrSingleRaterG, AttrSinglePhi = AttrSingleRaterPhi)
+
+AttrRaterG  <- AttrSigmaTar / (AttrSigmaTar + AttrSigmaError/k)
+AttrRaterPhi <- AttrSigmaTar / (AttrSigmaTar + AttrSigmaRat/k + AttrSigmaError/k)
+
+c(AttrG = AttrRaterG, AttrPhi = AttrRaterPhi)
+
+# ------------- RELIABILITY FIGHTING ---------------
+
+FghtSingleRaterG  <- FghtSigmaTar / (FghtSigmaTar + FghtSigmaError)
+FghtSingleRaterPhi <- FghtSigmaTar / (FghtSigmaTar + FghtSigmaRat + FghtSigmaError)
+
+c(FghtSingleG = FghtSingleRaterG, FghtSinglePhi = FghtSingleRaterPhi)
+
+FghtRaterG  <- FghtSigmaTar / (FghtSigmaTar + FghtSigmaError/k)
+FghtRaterPhi <- FghtSigmaTar / (FghtSigmaTar + FghtSigmaRat/k + FghtSigmaError/k)
+
+c(FghtG = FghtRaterG, FghtPhi = FghtRaterPhi)
+```
+
+```{r}
+
+# set k (common number of raters per target)
+k <- 11
+
+gt_df <- tibble(
+  Construct   = c("Attractiveness", "Fighting Ability"),
+  Single_G    = c(AttrSigmaTar / (AttrSigmaTar + AttrSigmaError),
+                  FghtSigmaTar / (FghtSigmaTar + FghtSigmaError)),
+  Single_Phi  = c(AttrSigmaTar / (AttrSigmaTar + AttrSigmaRat + AttrSigmaError),
+                  FghtSigmaTar / (FghtSigmaTar + FghtSigmaRat + FghtSigmaError)),
+  MeanK_G     = c(AttrSigmaTar / (AttrSigmaTar + AttrSigmaError / k),
+                  FghtSigmaTar / (FghtSigmaTar + FghtSigmaError / k)),
+  MeanK_Phi   = c(AttrSigmaTar / (AttrSigmaTar + (AttrSigmaRat + AttrSigmaError) / k),
+                  FghtSigmaTar / (FghtSigmaTar + (FghtSigmaRat + FghtSigmaError) / k))
+)
+
+gt_gen <- gt_df |>
+  gt(rowname_col = "Construct") |>
+  fmt_number(columns = where(is.numeric), decimals = 3) |>
+  cols_label(
+    Single_G   = md("**ρ²**"),
+    Single_Phi = md("**Φ**"),
+    MeanK_G    = md("**ρ²**"),
+    MeanK_Phi  = md("**Φ**")
+  ) |>
+  tab_spanner(label = md("**G Study** *(single rater, k = 1)*"),
+              columns = c(Single_G, Single_Phi)) |>
+  tab_spanner(label = md("**D Study** *(mean across raters, k = 11)*"),
+              columns = c(MeanK_G, MeanK_Phi)) |>
+  tab_header(title = md("*Table 4. Generalizability Theory Analysis*")) |>
+  tab_options(table.font.size = gt::px(11)) |>
+  cols_align(align = "left",   columns = "Construct") |>
+  cols_align(align = "center", columns = -Construct) |>
+  tab_style(
+    style = cell_text(size = px(11), align = "left"),
+    locations = list(
+      cells_title(groups = "title"),
+      cells_title(groups = "subtitle")
+    )
+  ) |>
+  tab_source_note(
+    md("**Note.** Reliability of target means relative to rater sampling error. G = Generalizability; D = Decision; ρ² = Generalizability Coefficient (relative); Φ = Dependability Coefficient (absolute). Estimated from a crossed one-facet (target × rater) random-effects model.")
+  ) |>
+  tab_style(
+    style = cell_text(align = "justify"),
+    locations = cells_source_notes()
+  )
+
+gt_gen
+```
+
+```{r}
+
+# Save as PNG/HTML
+gtsave(gt_gen, "GENERALIZABILITY_TABLE.png", vwidth = 720, expand = 5)
+gtsave(gt_gen, "GENERALIZABILITY_TABLE.html", inline_css = TRUE)
+```
